@@ -1,0 +1,14 @@
+# Compiled micro:bit firmware images
+*.hex
+
+# Office documents
+*.docx
+*.doc
+~$*
+
+# Python
+__pycache__/
+*.py[cod]
+
+# macOS
+.DS_Store
