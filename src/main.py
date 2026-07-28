@@ -38,6 +38,13 @@ ULTRA_PIN = pin15
 # needs re-calibration against the drive timing above.
 BLOCK_MM = 50
 
+# When True, the sensor checks the next cell after turning but *before*
+# driving into it, so a newly found obstacle can be avoided rather than hit.
+# When False, the scan happens after the move completes -- the behaviour used
+# in the demonstration, kept so the original failure can be reproduced. See
+# docs/design-notes.md; sim/simulate.py --compare runs both.
+SCAN_BEFORE_MOVE = True
+
 # --- Grid / display ------------------------------------------------------
 W = 5
 H = 5
@@ -435,6 +442,7 @@ def navigate_to_goal():
             return False
 
         moved = False
+        replanned = False
 
         for i in range(len(path) - 1):
             current_cell = path[i]
@@ -442,6 +450,15 @@ def navigate_to_goal():
 
             target_dir = direction_from_cells(current_cell, next_cell)
             turn_to(target_dir)
+
+            if SCAN_BEFORE_MOVE:
+                # Facing now equals target_dir and start is still
+                # current_cell, so this scans exactly the cell we are about
+                # to enter -- while there is still time to abort.
+                if scan_and_update_map():
+                    replanned = True
+                    break
+
             front()
             moved = True
 
@@ -452,11 +469,15 @@ def navigate_to_goal():
             if start == goal:
                 return True
 
-            new_wall = scan_and_update_map()
-            if new_wall:
-                break    # abandon this path; the outer loop replans
+            if not SCAN_BEFORE_MOVE:
+                if scan_and_update_map():
+                    replanned = True
+                    break    # abandon this path; the outer loop replans
 
-        if not moved:
+        # Re-planning without moving is progress: the grid gained a wall, so
+        # the next pass produces a different route. Only a pass that neither
+        # moved nor learned anything means we are genuinely stuck.
+        if not moved and not replanned:
             return False
 
     return True

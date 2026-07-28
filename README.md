@@ -1,106 +1,212 @@
 # micro:bit Maze Robot
 
-A small autonomous robot car, built on a BBC micro:bit, that solves a 5×5 grid
-maze and drives itself through it. It receives the map over radio, computes the
-shortest route with a wavefront (breadth-first) search, converts that route into
-physical motion, and watches for unmapped obstacles with an ultrasonic sensor as
-it goes.
+[![tests](https://github.com/Sriram-Gutta/microbit-maze-robot/actions/workflows/tests.yml/badge.svg)](https://github.com/Sriram-Gutta/microbit-maze-robot/actions/workflows/tests.yml)
+![python](https://img.shields.io/badge/python-3.9%2B-blue)
+![platform](https://img.shields.io/badge/platform-BBC%20micro%3Abit-informational)
+![license](https://img.shields.io/badge/license-MIT-green)
 
-This was a group project — I worked on it as part of a small team, and everything
-described here is the team's shared work.
+An autonomous robot car, built on a BBC micro:bit, that solves a 5×5 grid maze
+and drives itself through it. It receives the course map over radio, computes
+the shortest route with a wavefront (breadth-first) search, converts that route
+into physical motion, and re-plans on the fly when its ultrasonic sensor finds
+an obstacle that was never on the map.
 
-## What it does
+**The firmware runs on your laptop.** `sim/` puts stub `microbit`, `machine` and
+`radio` modules on the import path and drives the *real* `src/main.py` against a
+simulated world — no hardware required. That is how the obstacle-avoidance bug
+below was diagnosed and verified fixed.
 
-The robot runs in two stages.
+This was a group project; I worked on it as part of a small team, and the robot
+described here is the team's shared work. The simulator, test suite and the
+root-cause analysis of the stage 2 failure are my own follow-up work.
 
-**Stage 1 — navigate a known map.** On start-up the robot broadcasts a request
-over radio and receives a 25-character string describing the course. That string
-becomes a 5×5 grid of open cells, walls, a start cell (`S`) and a goal cell
-(`X`). A wavefront search floods outward from the start, labelling each reachable
-cell with its distance, then walks backward from the goal to recover the shortest
-path. The path is animated on the micro:bit LED display before the robot drives
-it, one cell at a time.
+---
 
-**Stage 2 — react to an obstacle that isn't on the map.** After every move the
-robot scans the cell ahead with the ultrasonic sensor. If something is close
-enough, that cell is marked as a wall, the grid is re-encoded, and the route is
-recomputed from the robot's current position. Driving resumes on the new path.
+## Try it in 10 seconds
 
-A map like `S01000010001110000101000X` decodes to:
-
-```
-S 0 1 0 0        S  start cell
-0 0 1 0 0        X  goal cell
-0 1 1 1 0        1  wall
-0 0 0 1 0        0  open
-1 0 0 0 X
+```console
+$ git clone https://github.com/Sriram-Gutta/microbit-maze-robot
+$ cd microbit-maze-robot
+$ python3 sim/simulate.py
 ```
 
-## Hardware
+No dependencies — standard library only, Python 3.9+.
 
-- BBC micro:bit (running MicroPython)
-- Robotbit expansion board — motor driver and power distribution
-- Two DC gear motors driving the rear wheels
-- HC-SR04-style ultrasonic sensor, fixed forward-facing on the front of the chassis
-- Rechargeable battery pack
+The robot is given a map with two equally short routes, then dropped into a
+world containing an obstacle that isn't on that map:
 
-The sensor is mounted rigidly rather than on a servo. Because the robot always
-turns to face a cell before entering it, a fixed forward-facing sensor sees
-everything the navigation logic actually needs, which removed a moving part and
-a whole class of calibration work.
+```
+  move 1 -> DOWN
+  WORLD         ROBOT'S MAP   LED
+  . . . . .     . . . . .     . . . . .
+  v O . . .     R . . . .     * . . . .
+  # . # . #     # . # . #     + . + . +
+  . . . . .     . . . . .     . . . . .
+  . . . . X     . . . . X     . . . . %
+  sensor: 40 mm toward RIGHT (cell (1, 1))
+
+  move 2 -> UP
+  WORLD         ROBOT'S MAP   LED
+  ^ . . . .     R . . . .     * . . . .
+  . O . . .     . # . . .     . + . . .
+  # . # . #     # . # . #     + . + . +
+  . . . . .     . . . . .     . . . . .
+  . . . . X     . . . . X     . . . . %
+```
+
+`WORLD` is ground truth — `O` is the hidden obstacle, `^ > v <` the robot and
+its heading. `ROBOT'S MAP` is what the firmware currently believes. Watch the
+obstacle appear as `#` on the robot's map the moment the sensor sees it, then
+watch the route change.
+
+## How it works
+
+```mermaid
+flowchart TD
+    A([Power on]) --> B[Broadcast 'Request' over radio]
+    B --> C{Map received?}
+    C -- timeout --> Z([Show NOREPLY])
+    C -- yes --> D[Parse 25-char string into a 5x5 grid]
+    D --> E[Wavefront flood fill from current cell]
+    E --> F{Goal reachable?}
+    F -- no --> Y([Show NOPATH])
+    F -- yes --> G[Animate the route on the LED matrix]
+    G --> H[Turn to face the next cell]
+    H --> I[Ultrasonic scan of that cell]
+    I --> J{Blocked?}
+    J -- yes --> K[Mark it a wall, re-encode the grid]
+    K --> E
+    J -- no --> L[Drive forward one cell]
+    L --> M{At the goal?}
+    M -- no --> H
+    M -- yes --> N([Show happy face])
+```
+
+**Wavefront search.** Flood outward from the current cell, labelling each
+reachable cell with its distance, then walk backward from the goal, always
+stepping to a neighbour labelled one lower. That yields a shortest path, and
+the distance field makes re-planning cheap.
+
+**Re-planning through the map string.** When the sensor finds an obstacle, the
+grid is re-encoded back into a 25-character map string — the robot's current
+cell becomes the new `S`, the obstacle becomes a `1` — and that string is parsed
+by the same function that handles radio input. It is not the most direct way to
+mutate a grid, but it means the re-planning path and the radio path converge on
+identical parsing code: one code path, exercised twice.
+
+A map like `S00000000010101000000000X` decodes to:
+
+```
+S . . . .        S  start cell
+. . . . .        X  goal cell
+# . # . #        #  wall
+. . . . .        .  open
+. . . . X
+```
+
+## The interesting bug
+
+In the live demonstration, stage 2 failed: the robot **detected** the obstacle —
+it appeared correctly on the LED map — but drove into it anyway.
+
+Rebuilding the run in the simulator reproduced it exactly and showed the cause.
+The scan happened *after* each move completed, so by the time an obstacle was
+seen, the robot had already committed to entering its cell. Worse, once its
+believed position had drifted from its real one, the reading got attributed to
+the wrong grid cell entirely — so it marked a wall it had never seen and left
+the real obstacle unmapped.
+
+The fix is to scan after turning but *before* driving, which gives the planner
+an actual interruption point. Both behaviours ship, selected by
+`SCAN_BEFORE_MOVE` in [src/main.py](src/main.py):
+
+```console
+$ python3 sim/simulate.py --compare
+
+                         scan AFTER move      scan BEFORE move
+                       (as demonstrated)     (current default)
+  ------------------------------------------------------------
+  reached goal                        no                   yes
+  collisions                           3                     0
+  moves                                8                    10
+  turns                                8                     9
+  sensor reads                         3                     5
+```
+
+Two extra moves is the detour around the obstacle. The demonstrated behaviour is
+kept, and covered by a regression test, so the original failure stays
+reproducible rather than becoming a story with no evidence behind it.
+
+## Tests
+
+```console
+$ python3 -m unittest discover -s tests -v
+...
+Ran 25 tests in 0.002s
+
+OK
+```
+
+Covering map parsing and its error cases, the sector round-trip, wavefront
+optimality and path contiguity, unreachable goals, heading arithmetic, and
+end-to-end missions with and without an unmapped obstacle.
 
 ## Repository layout
 
 ```
-src/main.py                 Flight code — the full stage 1 + stage 2 program
+src/main.py                 Robot firmware — the full stage 1 + stage 2 program
 src/robotbit_library.py     PCA9685 motor/servo driver for the Robotbit board
+sim/simulate.py             Desktop simulator and CLI
+sim/harness.py              Imports the MicroPython firmware under CPython
+sim/stubs/                  Stand-ins for microbit, machine, radio, robotbit
 tools/ultrasonic_test.py    Bench test that streams live distance readings
-docs/design-notes.md        Design decisions, calibration, and results
+tests/test_wavefront.py     Unit and end-to-end tests
+docs/design-notes.md        Design decisions, calibration, results, limitations
 ```
 
-`src/main.py` is the program that ran in the demonstration. Only the files above
-were part of the working system; earlier prototypes and unrelated class exercises
-are deliberately not included.
+## Hardware
 
-## Running it
+- BBC micro:bit (MicroPython)
+- Robotbit expansion board — motor driver and power distribution
+- Two DC gear motors driving the rear wheels
+- HC-SR04-style ultrasonic sensor, fixed forward-facing on the chassis
+- Rechargeable battery pack
+
+The sensor is mounted rigidly rather than on a servo. Because the robot always
+turns to face a cell before entering it, a fixed forward-facing sensor sees
+everything the navigation logic actually needs — which removed a moving part and
+a whole class of calibration work.
+
+## Running on the real robot
 
 1. Copy `src/robotbit_library.py` onto the micro:bit filesystem (the Mu editor's
    *Files* pane, or `ufs put`). `main.py` imports it and will not run without it.
 2. Flash `src/main.py` to the micro:bit.
-3. Set `RADIO_CHANNEL` in `src/main.py` to match the channel the map transmitter
-   is broadcasting on.
-4. Place the robot on the start cell, **facing "up"** relative to the grid — the
+3. Set `RADIO_CHANNEL` to match the channel the map transmitter broadcasts on.
+4. Place the robot on the start cell **facing "up"** relative to the grid — the
    heading tracker assumes this starting orientation.
 5. Power on. The display shows `R` while waiting for a map, sweeps a pixel across
-   the middle row as a progress indicator, then animates the solved path before
-   driving. `NOREPLY` means no map arrived; `NOPATH` means the goal is
-   unreachable.
+   the middle row as a progress indicator, then animates the solved route before
+   driving.
 
-## Calibration
+### Calibration
 
-Two timing constants in `src/main.py` control all motion, and both are specific
-to a given chassis and battery state:
+Two timing constants control all motion, and both are specific to a given
+chassis and battery charge:
 
 | Constant | Value | Meaning |
 |---|---|---|
 | `CELL_TIME_MS` | 856 | ms at 50% power to travel one cell (10 in) |
 | `TURN_TIME_MS` | 368 | ms at 50% power for a 90° rotation |
+| `BLOCK_MM` | 50 | distance at which the cell ahead counts as blocked |
 
-These were measured experimentally with the robot on a charging cable, so the
-motors ran at full torque. Expect to re-measure them for any other build — and
-note that a partly charged battery changes them, which caused real problems for
-us. See [docs/design-notes.md](docs/design-notes.md).
+These were measured with the robot on a charging cable so the motors ran at full
+torque. Expect to re-measure for any other build — and note that a partly charged
+battery changes them, which caused real problems here.
+[docs/design-notes.md](docs/design-notes.md) covers the calibration method, the
+power issues, the full results, and the remaining limitations.
 
-## Known limitations
+## License
 
-- **The obstacle threshold is too aggressive.** `BLOCK_MM = 50` was the value
-  used in the demonstration, and it fires too late: the robot has often already
-  begun entering the blocked cell before the reading trips. Somewhere in the
-  70–100 mm range is a better starting point, re-calibrated against the drive
-  timings.
-- **Replanning happens between moves, not during one.** A move command runs to
-  completion before the next scan, so there is no way to abort a step already in
-  progress. Checking the cell ahead *before* committing to a move would be the
-  more robust design.
-- **Dead reckoning only.** Position is tracked by counting commanded moves, with
-  no encoders or closed-loop feedback, so heading error accumulates over a run.
+MIT — see [LICENSE](LICENSE). `src/robotbit_library.py` is a course-provided
+driver, included unmodified.

@@ -203,3 +203,69 @@ subsystems — each one depended on the others being reliable at the same moment
   interactions between hardware, movement and sensing produced new failures
   without any code change at all. Iterative full-system testing was the single
   most valuable activity in the project.
+
+## Follow-up: reproducing and fixing the stage 2 failure
+
+After the project, the failure was reproduced away from the hardware. `sim/`
+puts stub `microbit`, `machine`, `radio` and `robotbit_library` modules on the
+import path and drives the real `src/main.py` against a ground-truth world,
+replacing only the four functions that touch the physical world: `front()`,
+`left()`, `right()` and `scan_front_mm()`. Everything else — search, path
+reconstruction, heading tracking, obstacle marking, re-planning — is the code
+that ran on the robot.
+
+Given a course containing an obstacle absent from the transmitted map, the
+simulator reproduced the demonstration failure exactly, and made the mechanism
+visible in a way the live run could not:
+
+1. The robot turns toward the next cell and drives into it.
+2. *Only then* does it scan — in its new heading, at the cell beyond.
+3. So the obstacle in the cell it just entered is never checked before entry.
+4. Once its believed position has diverged from its true position, the reading
+   is attributed to the wrong cell. It marks a wall it never saw, and the real
+   obstacle stays unmapped.
+
+Step 4 explains the most confusing part of the live run: the obstacle *did*
+appear on the LED map, yet the robot behaved as though it were somewhere else.
+It was marking the wrong cell.
+
+Moving the scan to after the turn but before the drive gives the planner a real
+interruption point — `start` is still the current cell and `facing` already
+equals the target heading, so the scan lands on exactly the cell about to be
+entered. Measured over the same course:
+
+| | scan after move (as demonstrated) | scan before move |
+|---|---|---|
+| reached goal | no | yes |
+| collisions | 3 | 0 |
+| moves | 8 | 10 |
+| sensor reads | 3 | 5 |
+
+The two extra moves are the detour around the obstacle. Both behaviours are
+kept in the firmware, selected by `SCAN_BEFORE_MOVE`, and both are covered by
+tests — including a regression test asserting that the old behaviour still
+collides, so the original defect stays reproducible.
+
+This also reframes the threshold question. 50 mm was blamed for the failure at
+the time, and it is genuinely too tight, but it was not the root cause: with
+the scan in the wrong place, no threshold value works, because there is no
+point at which the robot can act on the reading. Ordering was the defect;
+threshold was a contributing factor.
+
+## Remaining limitations
+
+- **The obstacle threshold is still tight.** `BLOCK_MM = 50` is the demonstrated
+  value. 70–100 mm is a better starting point on real hardware, re-calibrated
+  against the drive timings, since a real sensor has noise and a beam width that
+  the simulator does not model.
+- **Dead reckoning only.** Position is tracked by counting commanded moves, with
+  no encoders or closed-loop feedback, so heading error accumulates over a run.
+  This was the dominant physical failure mode and the simulator deliberately
+  does not model it — it assumes perfect motion, which is exactly what isolates
+  logic bugs from mechanical ones.
+- **Border cells are never sensed.** `interior_cell()` skips readings at the
+  edge of the grid, since a reading there is just the wall around the course.
+  An obstacle placed on a border cell would not be detected.
+- **The sensor cannot see sideways.** With a fixed forward mount, the robot only
+  learns about a cell by turning to face it, so obstacles are discovered one at
+  a time along the route rather than surveyed in advance.
