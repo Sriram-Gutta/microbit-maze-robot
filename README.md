@@ -16,9 +16,10 @@ an obstacle that was never on the map.
 simulated world — no hardware required. That is how the obstacle-avoidance bug
 below was diagnosed and verified fixed.
 
-This was a group project; I worked on it as part of a small team, and the robot
-described here is the team's shared work. The simulator, test suite and the
-root-cause analysis of the stage 2 failure are my own follow-up work.
+This was a 3-person course project (Mar–Apr 2026). The robot described here,
+including its drive calibration, is the team's shared work. The simulator, test
+suite and the root-cause analysis of the stage 2 failure are my own follow-up
+work (Jul 2026).
 
 ---
 
